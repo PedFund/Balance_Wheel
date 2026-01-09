@@ -605,13 +605,22 @@
             { name: 'Организация', color: '#e67e22', emoji: '⏰' }
         ];
 
+        // ===== NEW: globals for hover & redraw =====
+        let hoveredSector = null;
+        let lastScores = [];
+        let hoverBound = false;
+
+        // ===== NEW: keep geometry consistent in drawWheel + hover =====
+        const WHEEL_PADDING = 90;      // больше отступ -> подписи не режутся
+        const LABEL_RADIUS_ADD = 30;   // насколько выносить подписи от края круга
+
         function calculateBalance() {
             const form = document.getElementById('balanceForm');
             const scores = [];
 
             // Собираем данные по категориям
             const categoryNames = ['water', 'protein', 'fats', 'carbs', 'fiber', 'variety', 'organization'];
-            
+
             categoryNames.forEach(cat => {
                 const checkboxes = form.querySelectorAll(`input[name="${cat}"]:checked`);
                 scores.push(checkboxes.length);
@@ -621,26 +630,122 @@
             displayResults(scores);
         }
 
+        // ===== NEW: utilities =====
+        function drawMultilineText(ctx, text, x, y, maxWidth, lineHeight) {
+            const words = text.split(' ');
+            let line = '';
+            const lines = [];
+
+            for (let n = 0; n < words.length; n++) {
+                const testLine = line + words[n] + ' ';
+                const metrics = ctx.measureText(testLine);
+                if (metrics.width > maxWidth && n > 0) {
+                    lines.push(line.trim());
+                    line = words[n] + ' ';
+                } else {
+                    line = testLine;
+                }
+            }
+            lines.push(line.trim());
+
+            lines.forEach((l, i) => {
+                ctx.fillText(l, x, y + i * lineHeight);
+            });
+
+            return lines.length;
+        }
+
+        function shadeColor(color, percent) {
+            const f = parseInt(color.slice(1), 16);
+            const t = percent < 0 ? 0 : 255;
+            const p = Math.abs(percent) / 100;
+            const R = f >> 16;
+            const G = (f >> 8) & 0x00FF;
+            const B = f & 0x0000FF;
+
+            return "#" + (
+                0x1000000 +
+                (Math.round((t - R) * p) + R) * 0x10000 +
+                (Math.round((t - G) * p) + G) * 0x100 +
+                (Math.round((t - B) * p) + B)
+            ).toString(16).slice(1);
+        }
+
         function displayResults(scores) {
             const resultsDiv = document.getElementById('results');
             const canvas = document.getElementById('wheelCanvas');
             const ctx = canvas.getContext('2d');
-            
+
             // Показываем секцию результатов
             resultsDiv.classList.add('show');
             resultsDiv.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
+            // ===== NEW: store for hover redraw =====
+            lastScores = scores.slice();
+
             // Рисуем колесо баланса
             drawWheel(ctx, canvas, scores);
+
+            // ===== NEW: hover events (bind once) =====
+            setupWheelHover(canvas, ctx);
 
             // Отображаем детальные результаты
             displayDetailedScores(scores);
         }
 
+        // ===== NEW: hover handler (MUST be outside drawWheel) =====
+        function setupWheelHover(canvas, ctx) {
+            if (hoverBound) return;
+            hoverBound = true;
+
+            canvas.addEventListener('mousemove', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+                const maxRadius = Math.min(centerX, centerY) - WHEEL_PADDING;
+
+                const x = e.clientX - rect.left - centerX;
+                const y = e.clientY - rect.top - centerY;
+
+                const distance = Math.sqrt(x * x + y * y);
+
+                // Вне круга — ничего не подсвечиваем
+                if (distance > maxRadius) {
+                    if (hoveredSector !== null) {
+                        hoveredSector = null;
+                        drawWheel(ctx, canvas, lastScores);
+                    }
+                    return;
+                }
+
+                // угол: "верх" как старт
+                let angle = Math.atan2(y, x) + Math.PI / 2;
+                if (angle < 0) angle += Math.PI * 2;
+
+                const numCategories = categories.length;
+                const sector = Math.floor(angle / (Math.PI * 2 / numCategories));
+
+                if (hoveredSector !== sector) {
+                    hoveredSector = sector;
+                    drawWheel(ctx, canvas, lastScores);
+                }
+            });
+
+            canvas.addEventListener('mouseleave', () => {
+                if (hoveredSector !== null) {
+                    hoveredSector = null;
+                    drawWheel(ctx, canvas, lastScores);
+                }
+            });
+        }
+
         function drawWheel(ctx, canvas, scores) {
             const centerX = canvas.width / 2;
             const centerY = canvas.height / 2;
-            const maxRadius = Math.min(centerX, centerY) - 80;
+
+            // ===== CHANGED: padding-based radius so labels don't clip =====
+            const maxRadius = Math.min(centerX, centerY) - WHEEL_PADDING;
+
             const numCategories = categories.length;
 
             // Очищаем canvas
@@ -676,8 +781,11 @@
                 const startAngle = (Math.PI * 2 * i) / numCategories - Math.PI / 2;
                 const endAngle = (Math.PI * 2 * (i + 1)) / numCategories - Math.PI / 2;
 
-                // Заливка сектора
-                ctx.fillStyle = categories[i].color;
+                // ===== CHANGED: hover shading =====
+                ctx.fillStyle = (hoveredSector === i)
+                    ? shadeColor(categories[i].color, -15)
+                    : categories[i].color;
+
                 ctx.beginPath();
                 ctx.moveTo(centerX, centerY);
                 ctx.arc(centerX, centerY, radius, startAngle, endAngle);
@@ -685,30 +793,46 @@
                 ctx.fill();
             }
 
-            // Добавляем подписи категорий
-            ctx.fillStyle = '#2c3e50';
-            ctx.font = 'bold 16px Arial';
+            // ===== CHANGED: labels near sectors (mid-angle) + wrap + value =====
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
 
             for (let i = 0; i < numCategories; i++) {
-                const angle = (Math.PI * 2 * i) / numCategories - Math.PI / 2;
-                const labelRadius = maxRadius + 50;
-                const x = centerX + labelRadius * Math.cos(angle);
-                const y = centerY + labelRadius * Math.sin(angle);
+                const startAngle = (Math.PI * 2 * i) / numCategories - Math.PI / 2;
+                const endAngle = (Math.PI * 2 * (i + 1)) / numCategories - Math.PI / 2;
+                const midAngle = (startAngle + endAngle) / 2;
 
-                // Корректируем выравнивание для боковых надписей
-                if (Math.abs(Math.cos(angle)) > 0.5) {
-                    ctx.textAlign = Math.cos(angle) > 0 ? 'left' : 'right';
-                } else {
-                    ctx.textAlign = 'center';
-                }
+                const labelRadius = maxRadius + LABEL_RADIUS_ADD;
+                const x = centerX + labelRadius * Math.cos(midAngle);
+                const y = centerY + labelRadius * Math.sin(midAngle);
 
-                // Рисуем текст с тенью для лучшей читаемости
-                ctx.shadowColor = 'rgba(255, 255, 255, 0.8)';
-                ctx.shadowBlur = 4;
-                ctx.fillText(categories[i].emoji + ' ' + categories[i].name, x, y);
-                ctx.shadowBlur = 0;
+                const title = `${categories[i].emoji} ${categories[i].name}`;
+                const value = `${scores[i]}/10`;
+
+                const maxTextWidth = 120;
+                const lineHeight = 16;
+
+                ctx.font = 'bold 14px Arial';
+                const estimatedLines = Math.max(1, Math.ceil(ctx.measureText(title).width / maxTextWidth));
+                const totalHeight = estimatedLines * lineHeight + 18;
+
+                // фон под подпись
+                ctx.fillStyle = 'rgba(255,255,255,0.92)';
+                ctx.fillRect(
+                    x - maxTextWidth / 2 - 8,
+                    y - totalHeight / 2 - 8,
+                    maxTextWidth + 16,
+                    totalHeight + 16
+                );
+
+                // заголовок (с переносом)
+                ctx.fillStyle = '#2c3e50';
+                drawMultilineText(ctx, title, x, y - 8, maxTextWidth, lineHeight);
+
+                // значение категории
+                ctx.font = 'bold 13px Arial';
+                ctx.fillStyle = categories[i].color;
+                ctx.fillText(value, x, y + totalHeight / 2 - 12);
             }
         }
 
@@ -731,13 +855,17 @@
             document.getElementById('balanceForm').reset();
             document.getElementById('results').classList.remove('show');
             window.scrollTo({ top: 0, behavior: 'smooth' });
+
+            // ===== NEW: reset hover state =====
+            hoveredSector = null;
+            lastScores = [];
         }
 
         // Анимация появления элементов при загрузке
         window.addEventListener('load', () => {
             document.querySelector('.container').style.opacity = '0';
             document.querySelector('.container').style.transform = 'translateY(20px)';
-            
+
             setTimeout(() => {
                 document.querySelector('.container').style.transition = 'all 0.6s ease';
                 document.querySelector('.container').style.opacity = '1';
